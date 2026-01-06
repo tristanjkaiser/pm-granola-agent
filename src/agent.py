@@ -17,6 +17,7 @@ Your task is to analyze meeting notes and extract:
 1. Action items specifically for the PM (Product Manager)
 2. Development tickets that need to be created (categorized as backend, frontend, or design)
 3. A concise meeting summary plus any additional action items not captured in categories 1 or 2
+4. Action items for anyone else. Use specific names to identify action item owners.
 
 Be specific and actionable. For development tickets, include enough context that an engineer could understand what needs to be built."""
 
@@ -124,9 +125,11 @@ Only include items that are explicitly mentioned or clearly implied in the notes
 
         elif self.provider == "openai":
             model = model or "gpt-4o"
-            completion = self.client.chat.completions.create(
-                model=model,
-                messages=[
+
+            # Build API call parameters
+            api_params = {
+                "model": model,
+                "messages": [
                     {
                         "role": "system",
                         "content": self.SYSTEM_PROMPT
@@ -136,9 +139,27 @@ Only include items that are explicitly mentioned or clearly implied in the notes
                         "content": prompt
                     }
                 ],
-                max_tokens=4096,
-                temperature=0.7
-            )
+                "max_completion_tokens": 4096,
+            }
+
+            # Some models don't support temperature or system messages
+            # O1 models and certain experimental models only support temperature=1
+            models_without_temperature = ["o1", "gpt-5"]
+            supports_temperature = not any(model.startswith(prefix) for prefix in models_without_temperature)
+
+            if supports_temperature:
+                api_params["temperature"] = 0.7
+            else:
+                # Models without temperature support may also need combined messages
+                # O1 models require developer messages instead of system
+                api_params["messages"] = [
+                    {
+                        "role": "user",
+                        "content": f"{self.SYSTEM_PROMPT}\n\n{prompt}"
+                    }
+                ]
+
+            completion = self.client.chat.completions.create(**api_params)
             response_text = completion.choices[0].message.content
 
         # Parse JSON response
@@ -218,44 +239,54 @@ Only include items that are explicitly mentioned or clearly implied in the notes
         message_parts = []
 
         # Meeting Overview
-        message_parts.append("*📝 Meeting Summary*")
+        message_parts.append("*Meeting Summary*")
         message_parts.append(summary["overview"])
         message_parts.append("")
 
         # Key Decisions
         if summary.get("key_decisions"):
-            message_parts.append("*🎯 Key Decisions*")
+            message_parts.append("*Key Decisions*")
             for decision in summary["key_decisions"]:
                 message_parts.append(f"• {decision}")
             message_parts.append("")
 
-        # PM Action Items
-        if pm_items:
-            message_parts.append(f"*✅ PM Action Items ({len(pm_items)})*")
-            for item in pm_items:
-                priority_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(item["priority"], "⚪")
-                message_parts.append(f"{priority_emoji} {item['title']}")
-            message_parts.append("")
-
         # Dev Tickets
         if dev_tickets:
-            message_parts.append(f"*🔧 Development Tickets ({len(dev_tickets)})*")
+            message_parts.append(f"*Development Tickets ({len(dev_tickets)})*")
             for ticket in dev_tickets:
-                type_emoji = {"backend": "⚙️", "frontend": "🎨", "design": "✨"}.get(ticket["type"], "📋")
-                message_parts.append(f"{type_emoji} [{ticket['type'].upper()}] {ticket['title']}")
+                message_parts.append(f"• [{ticket['type'].upper()}] {ticket['title']}")
             message_parts.append("")
 
-        # Additional Action Items
-        if summary.get("additional_action_items"):
-            message_parts.append("*📌 Other Action Items*")
-            for item in summary["additional_action_items"]:
-                assignee = item.get("assignee", "Unassigned")
-                message_parts.append(f"• [{assignee}] {item['task']}")
+        # Combined Action Items (PM items + other action items)
+        all_action_items = []
+
+        # Add PM action items
+        for item in pm_items:
+            all_action_items.append({
+                "text": item['title'],
+                "assignee": None
+            })
+
+        # Add additional action items with assignees
+        for item in summary.get("additional_action_items", []):
+            assignee = item.get("assignee", "Unassigned")
+            all_action_items.append({
+                "text": item['task'],
+                "assignee": assignee if assignee.lower() != "unassigned" else None
+            })
+
+        if all_action_items:
+            message_parts.append(f"*Action Items ({len(all_action_items)})*")
+            for item in all_action_items:
+                if item["assignee"]:
+                    message_parts.append(f"• [{item['assignee']}] {item['text']}")
+                else:
+                    message_parts.append(f"• {item['text']}")
             message_parts.append("")
 
         # Next Steps
         if summary.get("next_steps"):
-            message_parts.append("*⏭️ Next Steps*")
+            message_parts.append("*Next Steps*")
             for step in summary["next_steps"]:
                 message_parts.append(f"• {step}")
 

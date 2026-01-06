@@ -42,19 +42,22 @@ def setup_environment():
 
 def process_meeting(
     document: dict,
-    granola_client: GranolaClient,
+    client: GranolaClient,
     processor: MeetingProcessor,
     output_manager: OutputManager,
-    model: Optional[str] = None
+    model: Optional[str] = None,
+    verbose: bool = False
 ) -> dict:
     """
     Process a single meeting document.
 
     Args:
         document: Document dictionary from Granola
-        granola_client: Granola API client
+        client: GranolaClient instance
         processor: Meeting processor instance
         output_manager: Output manager instance
+        model: Model to use for processing
+        verbose: Enable verbose parsing output
 
     Returns:
         Dictionary with paths to saved files
@@ -69,7 +72,7 @@ def process_meeting(
 
     # Convert to markdown
     try:
-        markdown_notes = granola_client.get_document_as_markdown(document)
+        markdown_notes = client.get_document_as_markdown(document, debug=verbose)
     except Exception as e:
         print(f"❌ Error converting document to markdown: {e}")
         return {}
@@ -185,6 +188,12 @@ Examples:
         help='Enable debug output for API requests'
     )
 
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Enable verbose output for ProseMirror parsing'
+    )
+
     args = parser.parse_args()
 
     # Setup
@@ -200,7 +209,7 @@ Examples:
 
     # Initialize components
     try:
-        granola_client = GranolaClient()
+        client = GranolaClient()
         processor = MeetingProcessor(provider=provider)
         output_manager = OutputManager(
             output_dir=args.output_dir or os.getenv('OUTPUT_DIR', './outputs')
@@ -228,7 +237,7 @@ Examples:
             limit = args.limit or 1
             print(f"\n📥 Fetching latest meeting...")
 
-        documents = granola_client.get_documents(limit=limit, debug=args.debug)
+        documents = client.get_documents(limit=limit, debug=args.debug)
 
         if not documents:
             print("❌ No documents found")
@@ -260,10 +269,11 @@ Examples:
         # Process the meeting
         saved_paths = process_meeting(
             doc,
-            granola_client,
+            client,
             processor,
             output_manager,
-            model=args.model
+            model=args.model,
+            verbose=args.verbose
         )
 
         if saved_paths:

@@ -124,83 +124,279 @@ class GranolaClient:
         docs = self.get_documents(limit=1)
         return docs[0] if docs else None
 
-    def prosemirror_to_markdown(self, prosemirror_json: Dict) -> str:
+    def get_document_transcript(self, document_id: str, debug: bool = False) -> Optional[str]:
+        """
+        Fetch the raw transcript for a document.
+
+        Args:
+            document_id: Granola document ID
+            debug: Enable debug output
+
+        Returns:
+            Formatted transcript string with speaker labels, or None if no transcript
+        """
+        data = {"document_id": document_id}
+
+        if debug:
+            print(f"\n🔍 Fetching transcript for document: {document_id}")
+
+        try:
+            # Use the v1 endpoint for transcripts
+            url = "https://api.granola.ai/v1/get-document-transcript"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+                "User-Agent": self.USER_AGENT,
+                "X-Client-Version": self.CLIENT_VERSION,
+            }
+
+            response = requests.post(url, json=data, headers=headers)
+
+            if debug:
+                print(f"   Transcript API Status: {response.status_code}")
+
+            response.raise_for_status()
+
+            transcript_segments = response.json()
+
+            if not transcript_segments or len(transcript_segments) == 0:
+                if debug:
+                    print("   No transcript segments found")
+                return None
+
+            # Format transcript with speaker labels
+            formatted_lines = []
+            for segment in transcript_segments:
+                source = segment.get('source', '')
+                text = segment.get('text', '').strip()
+
+                if not text:
+                    continue
+
+                if source == 'microphone':
+                    formatted_lines.append(f"**Me:** {text}")
+                elif source == 'system':
+                    formatted_lines.append(f"**System:** {text}")
+                else:
+                    # Unknown source, just include the text
+                    formatted_lines.append(text)
+
+            formatted_transcript = "\n\n".join(formatted_lines)
+
+            if debug:
+                print(f"   Transcript length: {len(formatted_transcript)} characters")
+                print(f"   Segments: {len(transcript_segments)}")
+
+            return formatted_transcript
+
+        except requests.exceptions.HTTPError as e:
+            if debug:
+                print(f"   HTTP Error fetching transcript: {e}")
+            # Don't raise - transcript might not exist for all documents
+            return None
+        except Exception as e:
+            if debug:
+                print(f"   Error fetching transcript: {e}")
+            return None
+
+    def prosemirror_to_markdown(self, prosemirror_json: Dict, debug: bool = False) -> str:
         """
         Convert ProseMirror JSON to Markdown.
 
-        This is a simplified converter. For production use, consider
-        using a proper ProseMirror to Markdown library.
-        """
-        def process_node(node: Dict) -> str:
-            node_type = node.get('type', '')
-            content = node.get('content', [])
-            text = node.get('text', '')
-
-            # Process text nodes
-            if text:
-                marks = node.get('marks', [])
-                for mark in marks:
-                    mark_type = mark.get('type', '')
-                    if mark_type == 'bold':
-                        text = f"**{text}**"
-                    elif mark_type == 'italic':
-                        text = f"*{text}*"
-                    elif mark_type == 'code':
-                        text = f"`{text}`"
-                return text
-
-            # Process block nodes
-            result = []
-            for child in content:
-                result.append(process_node(child))
-
-            text_content = ''.join(result)
-
-            if node_type == 'paragraph':
-                return text_content + '\n\n'
-            elif node_type == 'heading':
-                level = node.get('attrs', {}).get('level', 1)
-                return f"{'#' * level} {text_content}\n\n"
-            elif node_type == 'bulletList':
-                return text_content
-            elif node_type == 'listItem':
-                return f"- {text_content}"
-            elif node_type == 'codeBlock':
-                return f"```\n{text_content}\n```\n\n"
-            else:
-                return text_content
-
-        if isinstance(prosemirror_json, dict):
-            return process_node(prosemirror_json).strip()
-        return str(prosemirror_json)
-
-    def get_document_as_markdown(self, document: Dict) -> str:
-        """
-        Extract and convert document content to Markdown.
-
         Args:
-            document: Document dictionary from API
+            prosemirror_json: ProseMirror document JSON
+            debug: Enable debug output
 
         Returns:
             Markdown string
         """
-        # Try to get content from various possible fields
-        # Current API returns 'notes' field with ProseMirror content
-        content = (
+        def process_node(node: Dict, depth: int = 0, list_context: Optional[str] = None) -> str:
+            """
+            Recursively process ProseMirror nodes.
+
+            Args:
+                node: ProseMirror node
+                depth: Current recursion depth
+                list_context: 'bullet' or 'ordered' if inside a list
+            """
+            node_type = node.get('type', '')
+            content = node.get('content', [])
+            text = node.get('text', '')
+
+            if debug and depth < 3:  # Limit debug output depth
+                indent = "  " * depth
+                print(f"{indent}Node: {node_type}, has_text: {bool(text)}, children: {len(content)}")
+
+            # Process text nodes
+            if text:
+                marks = node.get('marks', [])
+                result_text = text
+                for mark in marks:
+                    mark_type = mark.get('type', '')
+                    if mark_type == 'bold':
+                        result_text = f"**{result_text}**"
+                    elif mark_type == 'italic':
+                        result_text = f"*{result_text}*"
+                    elif mark_type == 'code':
+                        result_text = f"`{result_text}`"
+                    elif mark_type == 'link':
+                        href = mark.get('attrs', {}).get('href', '')
+                        result_text = f"[{result_text}]({href})"
+                return result_text
+
+            # Process block nodes with children
+            result = []
+            for child in content:
+                result.append(process_node(child, depth + 1, list_context))
+
+            text_content = ''.join(result)
+
+            # Handle different node types
+            if node_type == 'doc':
+                # Root document node
+                return text_content
+
+            elif node_type == 'paragraph':
+                # Skip empty paragraphs
+                if not text_content.strip():
+                    return ''
+                # Don't add extra newlines inside list items
+                if list_context:
+                    return text_content
+                return text_content + '\n\n'
+
+            elif node_type == 'heading':
+                level = node.get('attrs', {}).get('level', 1)
+                if not text_content.strip():
+                    return ''
+                return f"{'#' * level} {text_content}\n\n"
+
+            elif node_type == 'bulletList':
+                # Process as bullet list
+                return text_content
+
+            elif node_type == 'orderedList':
+                # Process as numbered list
+                return text_content
+
+            elif node_type == 'listItem':
+                # Determine if we're in ordered or bullet list
+                if list_context == 'ordered':
+                    # For ordered lists, we'd need to track position
+                    # For now, use 1. for all items
+                    return f"1. {text_content.strip()}\n"
+                else:
+                    # Bullet list item
+                    return f"- {text_content.strip()}\n"
+
+            elif node_type == 'codeBlock':
+                language = node.get('attrs', {}).get('language', '')
+                return f"```{language}\n{text_content}\n```\n\n"
+
+            elif node_type == 'blockquote':
+                # Add > prefix to each line
+                lines = text_content.strip().split('\n')
+                quoted = '\n'.join(f"> {line}" for line in lines)
+                return f"{quoted}\n\n"
+
+            elif node_type == 'hardBreak':
+                return '\n'
+
+            elif node_type == 'horizontalRule':
+                return '---\n\n'
+
+            else:
+                # Unknown node type - just return content
+                if debug:
+                    print(f"  Unknown node type: {node_type}")
+                return text_content
+
+        if isinstance(prosemirror_json, dict):
+            result = process_node(prosemirror_json)
+            # Clean up multiple consecutive newlines
+            while '\n\n\n' in result:
+                result = result.replace('\n\n\n', '\n\n')
+            return result.strip()
+        return str(prosemirror_json)
+
+    def get_document_as_markdown(self, document: Dict, debug: bool = False) -> str:
+        """
+        Extract and convert document content to Markdown.
+
+        Combines Transcript, Enhanced Notes, and Manual Notes for comprehensive context.
+
+        Args:
+            document: Document dictionary from API
+            debug: Enable debug output for ProseMirror parsing
+
+        Returns:
+            Markdown string combining all available note sources
+        """
+        if debug:
+            print(f"\n🔍 Document fields: {list(document.keys())}")
+
+        sections = []
+        doc_id = document.get('id') or document.get('document_id')
+
+        # 1. Transcript (raw meeting transcript with speaker labels)
+        # Note: Always try to fetch transcript - the 'transcribe' flag is unreliable
+        if doc_id:
+            transcript = self.get_document_transcript(doc_id, debug=debug)
+            if transcript:
+                if debug:
+                    print(f"   Transcript length: {len(transcript)}")
+                sections.append("# Transcript\n\n" + transcript)
+
+        # 2. Enhanced Notes (Granola's AI-generated notes)
+        enhanced_notes = document.get('notes_markdown', '').strip()
+        if enhanced_notes:
+            if debug:
+                print(f"   Enhanced notes length: {len(enhanced_notes)}")
+            sections.append("# Enhanced Notes (by Granola)\n\n" + enhanced_notes)
+
+        # 3. Manual Notes (user-typed notes in ProseMirror format)
+        manual_content = (
             document.get('notes') or
             document.get('content') or
             document.get('prosemirror_content')
         )
 
-        if isinstance(content, dict):
-            return self.prosemirror_to_markdown(content)
-        elif isinstance(content, str):
-            # If content is already a string, try to parse as JSON
-            try:
-                content_dict = json.loads(content)
-                return self.prosemirror_to_markdown(content_dict)
-            except json.JSONDecodeError:
-                return content
+        if manual_content:
+            if debug:
+                print(f"   Manual content type: {type(manual_content).__name__}")
+
+            manual_markdown = ""
+            if isinstance(manual_content, dict):
+                manual_markdown = self.prosemirror_to_markdown(manual_content, debug=debug)
+            elif isinstance(manual_content, str):
+                try:
+                    content_dict = json.loads(manual_content)
+                    manual_markdown = self.prosemirror_to_markdown(content_dict, debug=debug)
+                except json.JSONDecodeError:
+                    manual_markdown = manual_content
+
+            manual_markdown = manual_markdown.strip()
+
+            # Only include manual notes if they have substantial content
+            # and are different from enhanced notes
+            if manual_markdown and len(manual_markdown) > 10:
+                # Check if manual notes are essentially the same as enhanced notes
+                if not enhanced_notes or manual_markdown != enhanced_notes.strip():
+                    if debug:
+                        print(f"   Manual notes length: {len(manual_markdown)}")
+                    sections.append("# Manual Notes\n\n" + manual_markdown)
+                elif debug:
+                    print(f"   Manual notes skipped (duplicate of enhanced notes)")
+
+        # Combine all sections
+        if sections:
+            combined = "\n\n---\n\n".join(sections)
+            if debug:
+                print(f"   Combined total length: {len(combined)}")
+            return combined
 
         # Fallback: return any text field we can find
-        return document.get('text', '') or str(document)
+        fallback = document.get('notes_plain', '') or document.get('text', '')
+        if debug and fallback:
+            print(f"   Using fallback, length: {len(fallback)}")
+        return fallback

@@ -6,69 +6,23 @@ from typing import Dict, List, Optional
 import json
 from anthropic import Anthropic
 from openai import OpenAI
+from .config import get_config
 
 
 class MeetingProcessor:
     """AI agent for extracting structured information from meeting notes."""
 
-    SYSTEM_PROMPT = """You are an AI assistant that analyzes meeting notes and extracts structured information.
-
-Your task is to analyze meeting notes and extract:
-1. Action items specifically for the PM (Product Manager)
-2. Development tickets that need to be created (categorized as backend, frontend, or design)
-3. A concise meeting summary plus any additional action items not captured in categories 1 or 2
-4. Action items for anyone else. Use specific names to identify action item owners.
-
-Be specific and actionable. For development tickets, include enough context that an engineer could understand what needs to be built."""
-
-    EXTRACTION_PROMPT = """Analyze the following meeting notes and extract information in the specified JSON format.
-
-Meeting Notes:
-{meeting_notes}
-
-Return a JSON object with this exact structure:
-{{
-  "pm_action_items": [
-    {{
-      "title": "Brief action item title",
-      "description": "Detailed description of what needs to be done",
-      "priority": "high|medium|low",
-      "deadline": "any mentioned deadline or null"
-    }}
-  ],
-  "dev_tickets": [
-    {{
-      "title": "Ticket title",
-      "description": "Detailed technical description",
-      "type": "backend|frontend|design",
-      "priority": "high|medium|low",
-      "acceptance_criteria": ["criterion 1", "criterion 2"]
-    }}
-  ],
-  "summary": {{
-    "overview": "2-3 sentence meeting summary",
-    "key_decisions": ["decision 1", "decision 2"],
-    "additional_action_items": [
-      {{
-        "assignee": "person name or 'unassigned'",
-        "task": "what needs to be done"
-      }}
-    ],
-    "next_steps": ["next step 1", "next step 2"]
-  }}
-}}
-
-Only include items that are explicitly mentioned or clearly implied in the notes. If a section has no items, use an empty array."""
-
-    def __init__(self, provider: str = "anthropic", api_key: Optional[str] = None):
+    def __init__(self, provider: str = "anthropic", api_key: Optional[str] = None, config=None):
         """
         Initialize the meeting processor.
 
         Args:
             provider: AI provider to use ("anthropic" or "openai")
             api_key: API key for the provider. If None, will read from env var.
+            config: Config instance. If None, will load from get_config()
         """
         self.provider = provider.lower()
+        self.config = config or get_config()
 
         if self.provider == "anthropic":
             self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
@@ -106,25 +60,27 @@ Only include items that are explicitly mentioned or clearly implied in the notes
         Returns:
             Dictionary with extracted information
         """
-        prompt = self.EXTRACTION_PROMPT.format(meeting_notes=meeting_notes)
+        # Use configured prompts
+        system_prompt = self.config.system_prompt
+        extraction_prompt = self.config.extraction_prompt.format(meeting_notes=meeting_notes)
 
         if self.provider == "anthropic":
-            model = model or "claude-3-5-sonnet-20241022"
+            model = model or self.config.ai_model or "claude-3-5-sonnet-20241022"
             message = self.client.messages.create(
                 model=model,
-                max_tokens=4096,
-                system=self.SYSTEM_PROMPT,
+                max_tokens=self.config.max_tokens,
+                system=system_prompt,
                 messages=[
                     {
                         "role": "user",
-                        "content": prompt
+                        "content": extraction_prompt
                     }
                 ]
             )
             response_text = message.content[0].text
 
         elif self.provider == "openai":
-            model = model or "gpt-4o"
+            model = model or self.config.ai_model or "gpt-4o"
 
             # Build API call parameters
             api_params = {
@@ -132,14 +88,14 @@ Only include items that are explicitly mentioned or clearly implied in the notes
                 "messages": [
                     {
                         "role": "system",
-                        "content": self.SYSTEM_PROMPT
+                        "content": system_prompt
                     },
                     {
                         "role": "user",
-                        "content": prompt
+                        "content": extraction_prompt
                     }
                 ],
-                "max_completion_tokens": 4096,
+                "max_completion_tokens": self.config.max_tokens,
             }
 
             # Some models don't support temperature or system messages
@@ -148,19 +104,30 @@ Only include items that are explicitly mentioned or clearly implied in the notes
             supports_temperature = not any(model.startswith(prefix) for prefix in models_without_temperature)
 
             if supports_temperature:
-                api_params["temperature"] = 0.7
+                api_params["temperature"] = self.config.ai_temperature
             else:
                 # Models without temperature support may also need combined messages
                 # O1 models require developer messages instead of system
                 api_params["messages"] = [
                     {
                         "role": "user",
-                        "content": f"{self.SYSTEM_PROMPT}\n\n{prompt}"
+                        "content": f"{system_prompt}\n\n{extraction_prompt}"
                     }
                 ]
 
-            completion = self.client.chat.completions.create(**api_params)
-            response_text = completion.choices[0].message.content
+            try:
+                completion = self.client.chat.completions.create(**api_params)
+                response_text = completion.choices[0].message.content
+            except Exception as e:
+                raise ValueError(f"OpenAI API error: {e}")
+
+            # Check for empty response
+            if not response_text or not response_text.strip():
+                raise ValueError(
+                    f"AI returned empty response. This may indicate the model '{model}' "
+                    f"doesn't exist or isn't compatible with this task. "
+                    f"Try using 'gpt-4o' or 'gpt-4o-mini' instead."
+                )
 
         # Parse JSON response
         try:
@@ -178,7 +145,12 @@ Only include items that are explicitly mentioned or clearly implied in the notes
             return result
 
         except json.JSONDecodeError as e:
-            raise ValueError(f"Failed to parse AI response as JSON: {e}\n\nResponse: {response_text}")
+            raise ValueError(
+                f"Failed to parse AI response as JSON: {e}\n\n"
+                f"Response preview: {response_text[:500]}...\n\n"
+                f"This may indicate the model '{model}' doesn't follow JSON output format. "
+                f"Try using 'gpt-4o' or 'gpt-4o-mini' instead."
+            )
 
     def format_for_notion(self, pm_action_items: List[Dict]) -> List[Dict]:
         """
@@ -279,7 +251,10 @@ Only include items that are explicitly mentioned or clearly implied in the notes
             message_parts.append(f"*Action Items ({len(all_action_items)})*")
             for item in all_action_items:
                 if item["assignee"]:
-                    message_parts.append(f"• [{item['assignee']}] {item['text']}")
+                    # Try to convert name to Slack handle
+                    slack_handle = self.config.get_slack_handle(item["assignee"])
+                    display_name = slack_handle if slack_handle else item["assignee"]
+                    message_parts.append(f"• [{display_name}] {item['text']}")
                 else:
                     message_parts.append(f"• {item['text']}")
             message_parts.append("")

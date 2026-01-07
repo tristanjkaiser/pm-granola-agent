@@ -16,27 +16,53 @@ AI agent that processes **Granola** meeting notes to extract:
 
 ## Setup
 
+### Quick Start
+
 1. **Install dependencies:**
 ```bash
 pip install -r requirements.txt
 ```
 
-2. **Configure environment:**
+2. **Configure:**
 ```bash
 cp .env.example .env
-# Edit .env with your API keys and configuration
+# Edit .env - add your OpenAI/Anthropic API key
 ```
 
-3. **Setup:**
-- Granola must be installed and you must be logged in
-- No additional configuration needed - uses Granola's local credentials
-- **Automatically fetches full transcripts** for meetings with transcription
-- Combines: Transcript + Enhanced Notes + Manual Notes for complete context
+3. **Prerequisites:**
+- Granola must be installed and you're logged in
 
 4. **Run:**
 ```bash
 python main.py
 ```
+
+### Customization (Recommended for Teams)
+
+PM Agent is highly customizable via `.env`:
+
+**Add Team Context:**
+```bash
+COMPANY_CONTEXT=Digital agency building React Native apps for startups
+PM_ROLE_DESCRIPTION=PMs coordinate client projects and manage scope
+```
+
+**Slack Handle Mapping:**
+```bash
+SLACK_HANDLES=Tristan Kaiser:@tristan, April Smith:@april, George:@george
+```
+
+**Skip Recurring Meetings:**
+```bash
+SKIP_RECURRING_KEYWORDS=Daily Standup,1-on-1,Team Sync
+```
+
+**Auto-Prioritize Urgent Items:**
+```bash
+PRIORITY_KEYWORDS=urgent,blocker,asap,critical
+```
+
+**See [`.env.example`](.env.example) for all options.**
 
 ## Usage
 
@@ -71,9 +97,15 @@ python main.py --provider openai
 
 Use a specific model:
 ```bash
+# OpenAI (recommended: gpt-4o or gpt-4o-mini)
 python main.py --provider openai --model gpt-4o-mini
+python main.py --provider openai --model gpt-4o
+
+# Anthropic
 python main.py --provider anthropic --model claude-3-5-sonnet-20241022
 ```
+
+**Note:** O1-series models and experimental models may not work properly for structured JSON extraction. Use `gpt-4o`, `gpt-4o-mini`, or Claude models.
 
 ### All Options
 
